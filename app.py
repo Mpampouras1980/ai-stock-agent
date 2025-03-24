@@ -1,95 +1,106 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from prophet import Prophet
-import os
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Stock AI Agent", layout="centered")
+st.set_page_config(page_title="Stock AI Agent", layout="wide")
 
 st.title("AI Προβλέψεις Χαρτοφυλακίου ΧΑΑ")
 
-DEFAULT_FILE = "last_portfolio.xlsx"
 uploaded_file = st.file_uploader("Ανέβασε νέο Excel (ή άφησέ το κενό για να φορτωθεί το τελευταίο αποθηκευμένο)", type=["xlsx"])
 
-# Αν δεν ανέβει νέο αρχείο, φόρτωσε το τελευταίο αποθηκευμένο
-if uploaded_file:
+if uploaded_file is not None:
     df = pd.read_excel(uploaded_file)
+    df.to_excel("my_stocks_sample.xlsx", index=False)
     st.success("Φορτώθηκε νέο αρχείο.")
 else:
-    if os.path.exists(DEFAULT_FILE):
-        df = pd.read_excel(DEFAULT_FILE)
-        st.info("Φορτώθηκε το προηγούμενο χαρτοφυλάκιο.")
-    else:
-        st.warning("Δεν βρέθηκε προηγούμενο αρχείο. Ανέβασε αρχείο Excel.")
+    try:
+        df = pd.read_excel("my_stocks_sample.xlsx")
+    except:
+        st.warning("Δεν βρέθηκε αποθηκευμένο αρχείο. Ανέβασε ένα Excel πρώτα.")
         st.stop()
 
-min_profit = st.slider("Ελάχιστο ποσοστό κέρδους για αγορά", 0.0, 10.0, 1.0, 0.5)
-max_loss = st.slider("Μέγιστο ποσοστό ζημιάς για πώληση", -10.0, 0.0, -1.0, 0.5)
+min_profit_pct = st.slider("Ελάχιστο ποσοστό κέρδους για αγορά", min_value=0.0, max_value=10.0, value=6.5, step=0.5)
+max_loss_pct = st.slider("Μέγιστο ποσοστό ζημιάς για πώληση", min_value=-10.0, max_value=0.0, value=-1.0, step=0.5)
 
-suggestions = []
-updated_portfolio = df.copy()
+def predict_future_price(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="3mo")
+        if len(hist) < 5:
+            return None
+        past_price = hist["Close"][-5]
+        current_price = hist["Close"][-1]
+        growth_rate = (current_price - past_price) / past_price
+        future_price = current_price * (1 + growth_rate)
+        return round(future_price, 2)
+    except:
+        return None
+
+def get_current_price(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return round(stock.history(period="1d")["Close"][-1], 2)
+    except:
+        return None
+
+predictions = []
+no_action = []
 
 for idx, row in df.iterrows():
-    name = row['Μετοχή']
-    ticker = row['Ticker']
-    try:
-        buy_price = float(row['ΤιμήΑγοράς'])
-        qty = int(row['Ποσότητα'])
-    except:
+    name = row["Stock"]
+    ticker = row["Ticker"]
+    quantity = row["Quantity"]
+
+    current_price = get_current_price(ticker)
+    predicted_price = predict_future_price(ticker)
+
+    if current_price is None or predicted_price is None:
         continue
 
-    try:
-        data = yf.download(ticker, period='6mo', interval='1d')
-        data = data.reset_index()[['Date', 'Close']]
-        data.columns = ['ds', 'y']
+    diff_pct = (predicted_price - current_price) / current_price * 100
 
-        if len(data) < 30:
-            continue
+    if diff_pct >= min_profit_pct:
+        action = "ΑΓΟΡΑ"
+    elif diff_pct <= max_loss_pct:
+        action = "ΠΩΛΗΣΗ"
+    else:
+        action = "Καμία ενέργεια"
 
-        model = Prophet(daily_seasonality=True)
-        model.fit(data)
-        future = model.make_future_dataframe(periods=5)
-        forecast = model.predict(future)
-        predicted_price = forecast['yhat'].iloc[-1]
-        diff_percent = ((predicted_price - buy_price) / buy_price) * 100
+    entry = {
+        "Μετοχή": name,
+        "Ticker": ticker,
+        "Ποσότητα": quantity,
+        "Τιμή Αγοράς": current_price,
+        "Πρόβλεψη Τιμής": predicted_price,
+        "% Διαφορά": f"{diff_pct:.2f}%",
+        "Πρόταση": action
+    }
 
-        if diff_percent >= min_profit:
-            action = "ΑΓΟΡΑ"
-        elif diff_percent <= max_loss:
-            action = "ΠΩΛΗΣΗ"
-        else:
-            action = "ΚΡΑΤΑ"
+    if action == "Καμία ενέργεια":
+        no_action.append(entry)
+    else:
+        predictions.append(entry)
 
-        suggestions.append({
-            "Μετοχή": name,
-            "Ticker": ticker,
-            "Τιμή Αγοράς": round(buy_price, 2),
-            "Πρόβλεψη Τιμής": round(predicted_price, 2),
-            "% Διαφορά": f"{diff_percent:.2f}%",
-            "Πρόταση": action
-        })
+if predictions:
+    st.subheader("Προτάσεις:")
+    st.dataframe(pd.DataFrame(predictions))
+else:
+    st.subheader("Προτάσεις:")
+    st.write("empty")
 
-        # Αυτόματη ενημέρωση ποσότητας αν ο χρήστης εκτελέσει την πρόταση
-        if action == "ΑΓΟΡΑ":
-            updated_portfolio.at[idx, 'Ποσότητα'] += 10
-            updated_portfolio.at[idx, 'ΤιμήΑγοράς'] = predicted_price
-        elif action == "ΠΩΛΗΣΗ" and updated_portfolio.at[idx, 'Ποσότητα'] >= 10:
-            updated_portfolio.at[idx, 'Ποσότητα'] -= 10
+if no_action:
+    st.subheader("Καμία ενέργεια:")
+    st.dataframe(pd.DataFrame(no_action))
 
-    except Exception as e:
-        suggestions.append({
-            "Μετοχή": name,
-            "Ticker": ticker,
-            "Πρόβλεψη Τιμής": "-",
-            "% Διαφορά": "-",
-            "Πρόταση": "Σφάλμα"
-        })
-
-results_df = pd.DataFrame(suggestions)
-st.subheader("Προτάσεις:")
-st.dataframe(results_df)
-
-# Εκτέλεση πρότασης
-if st.button("✅ Πρόταση εκτελέστηκε - Αποθήκευση χαρτοφυλακίου"):
-    updated_portfolio.to_excel(DEFAULT_FILE, index=False)
-    st.success("Το χαρτοφυλάκιο ενημερώθηκε και αποθηκεύτηκε ως default για την επόμενη φορά.")
+if st.checkbox("✔️ Πρόταση εκτελέστηκε - Αποθήκευση χαρτοφυλακίου"):
+    new_df = df.copy()
+    for entry in predictions:
+        if entry["Πρόταση"] == "ΑΓΟΡΑ":
+            new_df.loc[new_df["Ticker"] == entry["Ticker"], "Quantity"] += 10
+        elif entry["Πρόταση"] == "ΠΩΛΗΣΗ":
+            new_df.loc[new_df["Ticker"] == entry["Ticker"], "Quantity"] = max(
+                0, new_df.loc[new_df["Ticker"] == entry["Ticker"], "Quantity"].values[0] - 10
+            )
+    new_df.to_excel("my_stocks_sample.xlsx", index=False)
+    st.success("Το χαρτοφυλάκιο αποθηκεύτηκε με τις νέες ποσότητες.")
