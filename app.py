@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
@@ -38,10 +38,24 @@ def predict_next_week_price(ticker):
     df["Target"] = df["Close"].shift(-5)
     df.dropna(inplace=True)
 
-    features = ["Close", "Volume", "MA10", "MA20", "RSI14", "MOM10"]
-    X = df[features]
+    all_features = ["Close", "Volume", "MA10", "MA20", "RSI14", "MOM10"]
+    X_all = df[all_features]
     y = df["Target"]
 
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_all, y)
+
+    # Feature selection (top 4)
+    importances = model.feature_importances_
+    feature_importance_df = pd.DataFrame({
+        "feature": all_features,
+        "importance": importances
+    }).sort_values(by="importance", ascending=False)
+
+    top_features = feature_importance_df["feature"].iloc[:4].tolist()
+    X = df[top_features]
+
+    # Cross-validation
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
     rmses = []
 
