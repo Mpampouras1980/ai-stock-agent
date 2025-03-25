@@ -1,100 +1,103 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
-import numpy as np
+import joblib
+import os
 
-st.set_page_config(page_title="Stock AI Agent")
-
+st.set_page_config(page_title="Stock AI Agent", layout="centered")
 st.title("Stock AI Agent")
-st.subheader("Upload your stock Excel")
 
-uploaded_file = st.file_uploader("Drag and drop file here", type=["xlsx"])
-
-MIN_HISTORY_DAYS = 60
-
-def fetch_stock_history(ticker):
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=MIN_HISTORY_DAYS)
-    df = yf.download(ticker, start=start_date, end=end_date)
-    return df["Close"] if not df.empty else None
-
-def predict_price(prices):
-    if prices is None or len(prices) < 2:
-        return None
-    model = LinearRegression()
-    X = np.arange(len(prices)).reshape(-1, 1)
-    y = np.array(prices)
-    model.fit(X, y)
-    return round(float(model.predict([[len(prices)]])), 2)
+uploaded_file = st.file_uploader("Upload your stock Excel", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-
-        required_columns = {"Stock", "Ticker", "Quantity"}
-        if not required_columns.issubset(df.columns):
-            st.error("Excel must contain the following columns: Stock, Ticker, Quantity")
-        else:
-            min_profit = st.slider("Minimum profit % for Buy", 0.0, 10.0, 1.5, 0.5)
-            max_loss = st.slider("Maximum loss % for Sell", -10.0, 0.0, -1.0, 0.5)
-
-            suggestions = []
-            total_profit = 0.0
-
-            for _, row in df.iterrows():
-                ticker = row["Ticker"]
-                quantity = row["Quantity"]
-                prices = fetch_stock_history(ticker)
-                predicted = predict_price(prices)
-
-                if predicted is None:
-                    continue
-
-                current_price = round(prices[-1], 2)
-                change_percent = ((predicted - current_price) / current_price) * 100
-
-                action = "HOLD"
-                if change_percent >= min_profit:
-                    action = "BUY"
-                    total_profit += (predicted - current_price) * quantity
-                elif change_percent <= max_loss:
-                    action = "SELL"
-                    total_profit += (predicted - current_price) * quantity
-
-                suggestions.append({
-                    "Stock": row["Stock"],
-                    "Ticker": ticker,
-                    "Quantity": quantity,
-                    "Buy Price": current_price,
-                    "Predicted Price": predicted,
-                    "% Change": f"{change_percent:.2f}%",
-                    "Action": action
-                })
-
-            suggestions_df = pd.DataFrame(suggestions)
-
-            if not suggestions_df.empty:
-                st.subheader("Suggestions:")
-                st.dataframe(suggestions_df, use_container_width=True)
-
-                st.success(f"Total potential profit: €{total_profit:.2f}")
-
-                if st.checkbox("✅ Execute suggestion - Save portfolio"):
-                    for index, row in suggestions_df.iterrows():
-                        action = row["Action"]
-                        if action == "BUY":
-                            df.loc[df["Ticker"] == row["Ticker"], "Quantity"] += row["Quantity"]
-                        elif action == "SELL":
-                            df.loc[df["Ticker"] == row["Ticker"], "Quantity"] = max(
-                                df.loc[df["Ticker"] == row["Ticker"], "Quantity"].values[0] - row["Quantity"], 0)
-
-                    df.to_excel("my_stocks_minimal_clean.xlsx", index=False)
-                    st.success("✔️ Suggestion executed - Portfolio updated and saved!")
-
-            else:
-                st.info("No action required based on your criteria.")
-
+        df.columns = df.columns.str.strip().str.lower()
+        required_columns = {'stock', 'ticker', 'quantity'}
+        if not required_columns.issubset(set(df.columns)):
+            st.error("Το αρχείο Excel πρέπει να περιέχει τις στήλες: Stock, Ticker, Quantity")
+            st.stop()
     except Exception as e:
         st.error(f"Error processing file: {e}")
+        st.stop()
+
+    st.success("Excel file loaded successfully.")
+
+    # Sliders
+    min_profit = st.slider("Minimum profit % for Buy", 0.0, 10.0, 1.5, 0.5)
+    max_loss = st.slider("Maximum loss % for Sell", -10.0, 0.0, -1.0, 0.5)
+
+    current_prices = {}
+    predicted_prices = {}
+
+    st.subheader("Suggestions:")
+
+    for index, row in df.iterrows():
+        ticker = row['ticker']
+        quantity = row['quantity']
+
+        try:
+            data = yf.download(ticker, period="60d", progress=False)
+            if data.empty or len(data) < 20:
+                continue
+
+            data['Return'] = data['Close'].pct_change()
+            data = data.dropna()
+
+            X = data[['Open', 'High', 'Low', 'Volume']]
+            y = data['Close']
+
+            model = LinearRegression()
+            model.fit(X, y)
+
+            latest = data[['Open', 'High', 'Low', 'Volume']].iloc[-1].values.reshape(1, -1)
+            prediction = model.predict(latest)[0]
+
+            current = data['Close'].iloc[-1]
+            change = (prediction - current) / current * 100
+
+            current_prices[ticker] = current
+            predicted_prices[ticker] = prediction
+
+            df.at[index, 'buy price'] = current
+            df.at[index, 'predicted price'] = prediction
+            df.at[index, '% change'] = round(change, 2)
+
+            if change > min_profit:
+                df.at[index, 'action'] = 'BUY'
+            elif change < max_loss:
+                df.at[index, 'action'] = 'SELL'
+            else:
+                df.at[index, 'action'] = ''
+
+        except Exception as e:
+            st.warning(f"{ticker} skipped: {e}")
+            continue
+
+    if not df['action'].dropna().empty:
+        st.dataframe(df[['stock', 'ticker', 'quantity', 'buy price', 'predicted price', '% change', 'action']])
+
+        total_profit = 0.0
+        for _, row in df.iterrows():
+            if row['action'] in ['BUY', 'SELL']:
+                profit = (row['predicted price'] - row['buy price']) * row['quantity']
+                if row['action'] == 'SELL':
+                    profit *= -1
+                total_profit += profit
+
+        st.success(f"Total potential profit: €{total_profit:.2f}")
+    else:
+        st.info("No BUY or SELL recommendations based on current settings.")
+
+    # Execute suggestion checkbox
+    if st.checkbox("✅ Execute suggestion - Save portfolio"):
+        updated_df = df.copy()
+        for index, row in df.iterrows():
+            if row['action'] == 'BUY':
+                updated_df.at[index, 'quantity'] += 10  # mock update
+            elif row['action'] == 'SELL':
+                updated_df.at[index, 'quantity'] = max(0, row['quantity'] - 10)
+
+        updated_df[['stock', 'ticker', 'quantity']].to_excel("my_stocks_minimal_clean.xlsx", index=False)
+        st.success("✔️ Portfolio updated and saved.")
