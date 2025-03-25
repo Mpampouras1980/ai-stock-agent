@@ -4,7 +4,6 @@ import yfinance as yf
 from sklearn.linear_model import LinearRegression
 from datetime import datetime, timedelta
 import joblib
-import os
 
 st.title("Stock AI Agent")
 
@@ -17,15 +16,19 @@ if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
         df.columns = df.columns.str.strip().str.lower()
-        st.success("Excel file loaded successfully.")
 
+        # Προσθήκη κενών στηλών
+        df["buy price"] = 0.0
+        df["predicted price"] = 0.0
+        df["% change"] = 0.0
+        df["action"] = ""
+
+        st.success("Excel file loaded successfully.")
         total_profit = 0.0
-        suggestions = []
 
         for index, row in df.iterrows():
             ticker = row["ticker"]
             quantity = row["quantity"]
-            name = row["stock"]
 
             try:
                 data = yf.download(ticker, period="6mo", interval="1d")
@@ -34,29 +37,28 @@ if uploaded_file:
                     continue
 
                 data = data.dropna()
-                data["Date"] = data.index
-                data["Date"] = data["Date"].map(datetime.toordinal)
+                data["Date"] = data.index.map(datetime.toordinal)
                 X = data[["Date"]]
                 y = data["Close"]
 
                 model = LinearRegression()
                 model.fit(X, y)
 
-                tomorrow = datetime.now() + timedelta(days=5)
-                prediction = model.predict([[tomorrow.toordinal()]])[0]
-                current = y.iloc[-1]
-                change = (prediction - current) / current * 100
+                future_date = datetime.now() + timedelta(days=5)
+                prediction = model.predict([[future_date.toordinal()]])
+                predicted_price = prediction.item()
+                current_price = y.iloc[-1]
+                change = (predicted_price - current_price) / current_price * 100
+                profit = (predicted_price - current_price) * quantity
 
-                profit = (prediction - current) * quantity if float(change) > min_profit or float(change) < max_loss else 0
-
-                df.at[index, "buy price"] = round(current, 2)
-                df.at[index, "predicted price"] = round(prediction, 2)
+                df.at[index, "buy price"] = round(current_price, 2)
+                df.at[index, "predicted price"] = round(predicted_price, 2)
                 df.at[index, "% change"] = round(change, 2)
 
-                if float(change) > min_profit:
+                if change > min_profit:
                     df.at[index, "action"] = "BUY"
                     total_profit += profit
-                elif float(change) < max_loss:
+                elif change < max_loss:
                     df.at[index, "action"] = "SELL"
                     total_profit += profit
                 else:
