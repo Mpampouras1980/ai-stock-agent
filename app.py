@@ -3,6 +3,8 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error
 import numpy as np
 import os
 
@@ -40,9 +42,26 @@ def predict_next_week_price(ticker):
     X = df[features]
     y = df["Target"]
 
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X, y)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    rmses = []
 
+    for train_idx, test_idx in kf.split(X):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        rmse = mean_squared_error(y_test, preds, squared=False)
+        rmses.append(rmse)
+
+    mean_rmse = np.mean(rmses)
+    avg_price = y.mean()
+
+    if mean_rmse > 0.05 * avg_price:
+        return None
+
+    model.fit(X, y)
     latest = X.iloc[-1].values.reshape(1, -1)
     prediction = model.predict(latest)[0]
 
@@ -102,7 +121,8 @@ if uploaded_file:
 
         if suggestions:
             st.subheader("Suggestions:")
-            st.dataframe(pd.DataFrame(suggestions))
+            suggestions_df = pd.DataFrame(suggestions)
+            st.dataframe(suggestions_df)
             st.success(f"Total potential profit: €{round(total_profit,2)}")
 
             if st.checkbox("✅ Execute suggestion - Save portfolio"):
