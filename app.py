@@ -50,9 +50,13 @@ if uploaded_file:
                     model.fit(X, y)
 
                     next_week = (data["Days"].max() + 5)
-                    predicted_price = model.predict([[next_week]])[0]
-                    current_price = y.iloc[-1]
-                    buy_price = row.get("buy price", current_price)
+                    predicted_price = float(model.predict([[next_week]])[0])
+                    current_price = float(y.iloc[-1])
+                    buy_price = float(row["buy price"]) if "buy price" in row and not pd.isna(row["buy price"]) else current_price
+
+                    if buy_price == 0:
+                        st.warning(f"{ticker} skipped: Buy price is zero.")
+                        continue
 
                     change_percent = ((predicted_price - buy_price) / buy_price) * 100
                     total_profit = round((predicted_price - buy_price) * quantity, 2)
