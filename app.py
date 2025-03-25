@@ -2,116 +2,95 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from sklearn.linear_model import LinearRegression
-import joblib
-import datetime
+from datetime import datetime, timedelta
 import os
 
 st.title("Stock AI Agent")
 
-uploaded_file = st.file_uploader("Upload your stock Excel", type="xlsx")
-
-min_profit = st.slider("Minimum profit % for Buy", min_value=0.0, max_value=10.0, value=1.5, step=0.5)
-max_loss = st.slider("Maximum loss % for Sell", min_value=-10.0, max_value=0.0, value=-1.0, step=0.5)
-
-portfolio_file = "latest_portfolio.xlsx"
-
-def load_portfolio(file):
+uploaded_file = st.file_uploader("Upload your stock Excel", type=["xlsx"])
+if uploaded_file is not None:
     try:
-        return pd.read_excel(file)
-    except:
-        return pd.DataFrame(columns=["stock", "ticker", "quantity", "buy price"])
+        df = pd.read_excel(uploaded_file, engine="openpyxl")
+        df.columns = df.columns.str.strip().str.lower()  # καθαρισμός ονομάτων στηλών
 
-def save_portfolio(df):
-    df.to_excel(portfolio_file, index=False)
-
-def train_model(ticker):
-    df = yf.download(ticker, period="6mo")
-    if df.empty or len(df) < 10:
-        return None
-    df = df.reset_index()
-    df["Date"] = pd.to_datetime(df["Date"])
-    df["DateOrdinal"] = df["Date"].map(datetime.datetime.toordinal)
-    X = df["DateOrdinal"].values.reshape(-1, 1)
-    y = df["Close"].values
-    model = LinearRegression()
-    model.fit(X, y)
-    return model, y[-1]
-
-def make_prediction(model, days=5):
-    future_date = datetime.date.today() + datetime.timedelta(days=days)
-    ordinal = future_date.toordinal()
-    prediction = model.predict([[ordinal]])
-    return prediction.item()
-
-if uploaded_file:
-    try:
-        stocks_df = pd.read_excel(uploaded_file)
-        st.success("Excel file loaded successfully.")
-        actions = []
-        no_action = []
-        for index, row in stocks_df.iterrows():
-            name = row["stock"]
-            ticker = row["ticker"]
-            quantity = row["quantity"]
-
-            model_data = train_model(ticker)
-            if not model_data:
-                st.warning(f"{ticker} skipped: Not enough data")
-                no_action.append([name, ticker, quantity, 0, 0, 0, ""])
-                continue
-
-            model, current_price = model_data
-            predicted_price = make_prediction(model)
-            change = float((predicted_price - current_price) / current_price * 100)
-
-            action = ""
-            if change >= min_profit:
-                action = "BUY"
-            elif change <= max_loss:
-                action = "SELL"
-
-            if action:
-                actions.append([name, ticker, quantity, round(current_price, 2), round(predicted_price, 2), round(change, 2), action])
-            else:
-                no_action.append([name, ticker, quantity, round(current_price, 2), round(predicted_price, 2), round(change, 2), ""])
-
-        if actions:
-            st.subheader("Suggestions:")
-            actions_df = pd.DataFrame(actions, columns=["stock", "ticker", "quantity", "buy price", "predicted", "% change", "action"])
-            st.dataframe(actions_df)
-
-            total_profit = sum([(row[4] - row[3]) * row[2] for row in actions if row[6] == "BUY"])
-            st.success(f"Total potential profit: €{round(total_profit, 2)}")
-
-            execute = st.checkbox("✅ Execute suggestion - Save portfolio")
-            if execute:
-                portfolio_df = load_portfolio(portfolio_file)
-
-                for row in actions:
-                    stock, ticker, qty, buy_price, predicted, change, action = row
-                    if action == "BUY":
-                        existing = portfolio_df[portfolio_df["ticker"] == ticker]
-                        if not existing.empty:
-                            idx = existing.index[0]
-                            portfolio_df.at[idx, "quantity"] += qty
-                        else:
-                            portfolio_df = portfolio_df.append({"stock": stock, "ticker": ticker, "quantity": qty, "buy price": buy_price}, ignore_index=True)
-                    elif action == "SELL":
-                        existing = portfolio_df[portfolio_df["ticker"] == ticker]
-                        if not existing.empty:
-                            idx = existing.index[0]
-                            new_qty = max(0, portfolio_df.at[idx, "quantity"] - qty)
-                            portfolio_df.at[idx, "quantity"] = new_qty
-
-                save_portfolio(portfolio_df)
-                st.success("✅ Suggestion executed — Portfolio saved.")
-
+        if not all(col in df.columns for col in ["stock", "ticker", "quantity"]):
+            st.error("Excel must include: stock, ticker, quantity")
         else:
-            st.info("No buy or sell suggestions today.")
+            st.success("Excel file loaded successfully.")
 
-        if no_action:
+            min_profit = st.slider("Minimum profit % for Buy", 0.0, 10.0, 1.5, step=0.1)
+            max_loss = st.slider("Maximum loss % for Sell", -10.0, 0.0, -1.0, step=0.1)
+
+            suggestions = pd.DataFrame(columns=["stock", "ticker", "quantity", "buy price", "predicted price", "% change", "action"])
+
+            for index, row in df.iterrows():
+                ticker = row["ticker"]
+                stock_name = row["stock"]
+                quantity = row["quantity"]
+
+                try:
+                    data = yf.download(ticker, period="6mo", interval="1d", progress=False)
+                    if data.empty:
+                        st.warning(f"{ticker} skipped: No data available")
+                        continue
+
+                    data.dropna(inplace=True)
+                    data["Date"] = data.index
+                    data["Days"] = (data["Date"] - data["Date"].min()).dt.days
+                    X = data[["Days"]]
+                    y = data["Close"]
+
+                    model = LinearRegression()
+                    model.fit(X, y)
+
+                    next_day = X["Days"].max() + 1
+                    predicted_price = round(float(model.predict([[next_day]])[0]), 2)
+                    current_price = round(y.iloc[-1], 2)
+                    change_percent = ((predicted_price - current_price) / current_price) * 100
+
+                    if change_percent >= min_profit or change_percent <= max_loss:
+                        action = "BUY" if change_percent >= min_profit else "SELL"
+                        suggestions = suggestions.append({
+                            "stock": stock_name,
+                            "ticker": ticker,
+                            "quantity": quantity,
+                            "buy price": current_price,
+                            "predicted price": predicted_price,
+                            "% change": round(change_percent, 2),
+                            "action": action
+                        }, ignore_index=True)
+
+                except Exception as e:
+                    st.warning(f"{ticker} skipped: {e}")
+
+            if not suggestions.empty:
+                st.subheader("Suggestions:")
+                st.dataframe(suggestions)
+
+                total_profit = 0
+                for _, row in suggestions.iterrows():
+                    if row["action"] == "SELL":
+                        profit = (row["predicted price"] - row["buy price"]) * row["quantity"]
+                        total_profit += profit
+                st.success(f"Total potential profit: €{round(total_profit, 2)}")
+
+                execute = st.checkbox("✅ Execute suggestion - Save portfolio")
+                if execute:
+                    for _, row in suggestions.iterrows():
+                        idx = df[df["ticker"] == row["ticker"]].index
+                        if row["action"] == "SELL":
+                            df.loc[idx, "quantity"] = max(0, df.loc[idx, "quantity"].values[0] - row["quantity"])
+                        elif row["action"] == "BUY":
+                            df.loc[idx, "quantity"] = df.loc[idx, "quantity"].values[0] + row["quantity"]
+
+                    df.to_excel("my_stocks_minimal_clean.xlsx", index=False)
+                    st.success("Suggestion executed. Portfolio updated.")
+
+            else:
+                st.info("No buy or sell suggestions today.")
+
             st.subheader("No action:")
-            st.dataframe(pd.DataFrame(no_action, columns=["stock", "ticker", "quantity", "buy price", "predicted", "% change", "action"]))
+            st.dataframe(df)
 
     except Exception as e:
         st.error(f"Error processing file: {e}")
