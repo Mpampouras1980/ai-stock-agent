@@ -2,5 +2,6 @@
 streamlit
 pandas
 yfinance
-prophet
+scikit-learn
+joblib
 openpyxl
