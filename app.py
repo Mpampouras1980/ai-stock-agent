@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import joblib
 import os
 from sklearn.linear_model import LinearRegression
 from datetime import datetime, timedelta
