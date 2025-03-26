@@ -1,148 +1,153 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import joblib
-import os
-import smtplib
-from email.mime.text import MIMEText
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+import joblib
 import numpy as np
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Stock AI Agent", layout="wide")
+# ---------------------- CONFIGURATION ----------------------
 
-# --- Feature engineering functions ---
-def add_technical_indicators(df):
-    df['MA7'] = df['Close'].rolling(window=7).mean()
-    df['MA21'] = df['Close'].rolling(window=21).mean()
-    df['RSI'] = compute_rsi(df['Close'], 14)
+DEFAULT_CASHOUT_TARGET = 10000
+EMAIL_RECEIVER = "gprovopo@googlemail.com"
+EMAIL_SENDER = "gprovopo@googlemail.com"
+EMAIL_APP_PASSWORD = "knuehkeowscowyhh"  # Application-specific password
+
+# ---------------------- UTILITY FUNCTIONS ----------------------
+
+def send_notification(subject, body):
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_RECEIVER
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_APP_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, text)
+        server.quit()
+    except Exception as e:
+        st.warning(f"Notification failed: {e}")
+
+def fetch_stock_data(ticker):
+    end = datetime.now()
+    start = end - timedelta(days=180)
+    data = yf.download(ticker, start=start, end=end)
+    return data
+
+def calculate_technical_indicators(df):
+    df['MA_5'] = df['Close'].rolling(window=5).mean()
+    df['MA_10'] = df['Close'].rolling(window=10).mean()
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
     df['Momentum'] = df['Close'] - df['Close'].shift(5)
-    df = df.dropna()
+    df.dropna(inplace=True)
     return df
 
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def train_model(df):
+    df = calculate_technical_indicators(df)
+    X = df[['Close', 'MA_5', 'MA_10', 'RSI', 'Momentum']]
+    y = df['Close'].shift(-5).dropna()
+    X = X.iloc[:-5]
+    y = y.reset_index(drop=True)
+    X = X.reset_index(drop=True)
 
-# --- Email alert function ---
-def send_email(subject, body):
-    sender_email = "gprovopo@googlemail.com"
-    receiver_email = "gprovopo@googlemail.com"
-    app_password = "knuehkeowscowyhh"
-    
-    message = MIMEText(body)
-    message['Subject'] = subject
-    message['From'] = sender_email
-    message['To'] = receiver_email
-    
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, app_password)
-            server.send_message(message)
-    except Exception as e:
-        st.error(f"Email failed: {e}")
-
-# --- Forecast function ---
-def forecast_stock_price(ticker):
-    df = yf.download(ticker, period="6mo", interval="1d")
-    if df.empty or len(df) < 60:
-        raise ValueError("Not enough data.")
-    
-    df = add_technical_indicators(df)
-    df = df.dropna()
-    df['Target'] = df['Close'].shift(-5)  # Forecast horizon: 5 days
-    
-    df = df.dropna()
-    X = df[['Close', 'MA7', 'MA21', 'RSI', 'Momentum']]
-    y = df['Target']
-
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model = RandomForestRegressor(n_estimators=100, random_state=0)
     model.fit(X, y)
-    y_pred = model.predict(X)
-    rmse = mean_squared_error(y, y_pred, squared=False)
+    return model
 
-    if rmse / y.mean() > 0.05:
-        raise ValueError("Low predictability (RMSE too high)")
+def predict_price(df, model):
+    df = calculate_technical_indicators(df)
+    X_latest = df[['Close', 'MA_5', 'MA_10', 'RSI', 'Momentum']].tail(1)
+    return model.predict(X_latest)[0]
 
-    last_row = df.iloc[-1][['Close', 'MA7', 'MA21', 'RSI', 'Momentum']]
-    forecast = model.predict([last_row.values.ravel()])[0]
-    return forecast
+# ---------------------- STREAMLIT GUI ----------------------
 
-# --- GUI ---
 st.title("Stock AI Agent")
 
 uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
-cashout_target = st.slider("Cash-out target value (€)", 1000, 20000, 10000)
 
-min_profit_buy = st.slider("Minimum profit % for Buy", 0.0, 10.0, 1.5)
-# max_loss_sell = st.slider("Maximum loss % for Sell", -10.0, 0.0, -1.0)  # Optional
+cashout_target = st.slider("Cash-out target value (€)", min_value=1000, max_value=20000, value=DEFAULT_CASHOUT_TARGET)
+min_profit_percent = st.slider("Minimum profit % for Buy", 0.0, 10.0, 1.5)
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-        df.columns = df.columns.str.lower()
-
         st.success("Excel file loaded.")
 
-        tickers = df["ticker"].tolist()
-        quantities = df["quantity"].tolist()
-        total_current_value = 0
-        sell_suggestions = []
-        buy_suggestions = []
-        alert_msg = ""
-        
-        for i, ticker in enumerate(tickers):
-            try:
-                forecast = forecast_stock_price(ticker)
-                current_price = yf.download(ticker, period="1d")["Close"].iloc[-1]
-                quantity = quantities[i]
-                total_current_value += current_price * quantity
+        if not all(col in df.columns for col in ['stock', 'ticker', 'quantity']):
+            st.error("Excel must contain columns: stock, ticker, quantity")
+        else:
+            df['buy_price'] = 0.0
+            df['predicted_price'] = 0.0
+            df['future_price'] = 0.0
+            df['current_price'] = 0.0
+            df['action'] = ''
+            df['profit'] = 0.0
 
-                if forecast > current_price * (1 + min_profit_buy / 100):
-                    buy_suggestions.append({
-                        "ticker": ticker,
-                        "current": round(current_price, 2),
-                        "forecast": round(forecast, 2),
-                        "gain %": round((forecast - current_price) / current_price * 100, 2)
-                    })
+            total_value = 0.0
 
-                elif current_price * quantity + 10 > cashout_target:
-                    sell_suggestions.append({
-                        "ticker": ticker,
-                        "current": round(current_price, 2),
-                        "forecast": round(forecast, 2),
-                        "value": round(current_price * quantity, 2)
-                    })
+            suggestions = []
 
-            except Exception as e:
-                st.warning(f"{ticker} skipped: {e}")
-        
-        st.markdown(f"**Current portfolio value:** €{round(total_current_value,2)}")
+            for i, row in df.iterrows():
+                ticker = row['ticker']
+                quantity = row['quantity']
+                try:
+                    data = fetch_stock_data(ticker)
+                    if data is not None and not data.empty:
+                        model = train_model(data)
+                        pred_price = predict_price(data, model)
+                        future_price = pred_price
+                        current_price = data['Close'][-1]
+                        buy_price = current_price  # live assumption
 
-        if total_current_value > cashout_target:
-            alert_msg = f"Cash-out opportunity: Your portfolio value is €{round(total_current_value,2)} exceeding the target €{cashout_target}. Consider selling."
+                        df.at[i, 'buy_price'] = buy_price
+                        df.at[i, 'predicted_price'] = pred_price
+                        df.at[i, 'future_price'] = future_price
+                        df.at[i, 'current_price'] = current_price
 
-        if alert_msg:
-            st.success(alert_msg)
-            send_email("Cash-out Alert", alert_msg)
+                        profit = (pred_price - buy_price) * quantity
+                        df.at[i, 'profit'] = profit
+                        total_value += current_price * quantity
 
-        if buy_suggestions:
-            st.subheader("Buy Suggestions")
-            st.dataframe(pd.DataFrame(buy_suggestions))
+                        profit_percent = ((pred_price - buy_price) / buy_price) * 100
+                        if profit_percent >= min_profit_percent:
+                            df.at[i, 'action'] = 'BUY'
+                            suggestions.append(row)
 
-        if sell_suggestions:
-            st.subheader("Sell Suggestions (Cash-out)")
-            st.dataframe(pd.DataFrame(sell_suggestions))
+                except Exception as e:
+                    st.warning(f"{ticker} skipped: {e}")
 
-        if not buy_suggestions and not sell_suggestions:
-            st.info("No suggestions today.")
+            st.markdown(f"**Current portfolio value:** €{total_value:.2f}")
 
-        st.subheader("No action:")
-        st.dataframe(df)
+            if total_value > cashout_target:
+                excess = total_value - cashout_target
+                subject = f"[Stock AI Agent] Cash-out Suggestion: Exceeded €{cashout_target}"
+                body = f"Your current portfolio value is €{total_value:.2f}, which exceeds your target of €{cashout_target}.\nSuggested cash-out amount: €{excess:.2f}"
+                send_notification(subject, body)
+                st.info(f"Cash-out recommendation: Sell €{excess:.2f} worth of stocks to match your cash-out target.")
 
+            if suggestions:
+                st.subheader("Suggestions:")
+                st.dataframe(df[df['action'] == 'BUY'][['stock', 'ticker', 'quantity', 'buy_price', 'predicted_price', 'profit']])
+                st.success(f"Total potential profit: €{df['profit'].sum():.2f}")
+            else:
+                st.info("No suggestions today.")
+
+            st.subheader("No action:")
+            st.dataframe(df[df['action'] == ''][['stock', 'ticker', 'quantity']])
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"Error: {e}")
